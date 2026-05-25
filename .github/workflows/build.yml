@@ -32,16 +32,19 @@ jobs:
         include:
           - arch:   x86_64
             target: x86_64-linux-musl
+            cpu:    ""                   # generic，zig 自动处理
 
           - arch:   aarch64
             target: aarch64-linux-musl
+            cpu:    ""
 
           - arch:   armv7l
             target: arm-linux-musleabihf
+            cpu:    ""
 
-          # ✅ 新增 s390x（IBM Z 系列大型机，Tier 3）
           - arch:   s390x
             target: s390x-linux-musl
+            cpu:    z15                  # ✅ z15 = Linux 支持的最低基准 CPU
 
     steps:
       - name: Checkout
@@ -57,8 +60,15 @@ jobs:
           VERSION=$(git describe --tags --always --dirty 2>/dev/null || echo "dev")
           mkdir -p dist
 
+          # 有指定 cpu 才追加 -mcpu，其他架构不受影响
+          CPU_FLAG=""
+          if [ -n "${{ matrix.cpu }}" ]; then
+            CPU_FLAG="-mcpu=${{ matrix.cpu }}"
+          fi
+
           zig cc \
             -target ${{ matrix.target }} \
+            $CPU_FLAG \
             -Os -s -static \
             -DVERSION=\"${VERSION}\" \
             -o dist/disk_alert_${{ matrix.arch }} \
@@ -67,7 +77,6 @@ jobs:
           ls -lh dist/disk_alert_${{ matrix.arch }}
           file dist/disk_alert_${{ matrix.arch }}
 
-      # x86_64 才能在 runner 上直接运行，其他架构均跳过
       - name: Smoke test (x86_64 only)
         if: matrix.arch == 'x86_64'
         run: |
@@ -129,7 +138,6 @@ jobs:
           name: disk_alert_armv7l
           path: release/
 
-      # ✅ 新增 s390x 下载
       - name: Download artifact (s390x)
         uses: actions/download-artifact@v4
         with:
@@ -211,7 +219,7 @@ jobs:
             | `..._linux_x86_64.tar.gz`  | x86_64 | 常规服务器 / VPS |
             | `..._linux_aarch64.tar.gz` | arm64  | 树莓派 4、ARM 云服务器 |
             | `..._linux_armv7l.tar.gz`  | armv7  | 树莓派 2/3、嵌入式设备 |
-            | `..._linux_s390x.tar.gz`   | s390x  | IBM Z 系列大型机 |
+            | `..._linux_s390x.tar.gz`   | s390x  | IBM Z 大型机（z15+）|
 
             ### 校验完整性
             ```bash
