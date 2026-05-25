@@ -1,0 +1,25 @@
+# Service
+cat > /etc/systemd/system/disk-alert.service << EOF
+[Unit]
+Description=Disk alert
+
+[Service]
+Type=oneshot
+ExecStart=/opt/disk_alert -t 85 -p / -p /data -w "https://open.feishu.cn/open-apis/bot/v2/hook/YOUR_TOKEN"
+EOF
+
+# Timer
+cat > /etc/systemd/system/disk-alert.timer << EOF
+[Unit]
+Description=Disk alert timer
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=10min
+
+[Install]
+WantedBy=timers.target
+EOF
+
+systemctl daemon-reload
+systemctl enable --now disk-alert.timer
