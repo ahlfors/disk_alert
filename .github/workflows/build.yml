@@ -7,18 +7,21 @@ on:
   pull_request:
     branches: [ main, master ]
   workflow_dispatch:
+    inputs:
+      release:
+        description: '是否创建 Release（仅在推送了 tag 时有效）'
+        required: false
+        default: 'false'
+        type: choice
+        options: ['true', 'false']
 
 permissions:
   contents: write
 
 jobs:
-  # ═══════════════════════════════════════════════════
-  # Job 1: 多架构静态编译
-  # ═══════════════════════════════════════════════════
   build:
     name: Build [${{ matrix.arch }}]
     runs-on: ubuntu-latest
-
     strategy:
       fail-fast: false
       matrix:
@@ -70,23 +73,26 @@ jobs:
           path: dist/disk_alert_${{ matrix.arch }}
           retention-days: 30
 
-  # ═══════════════════════════════════════════════════
-  # Job 2: 打包 & 发布 Release（仅 tag push 触发）
-  # ═══════════════════════════════════════════════════
   release:
     name: Release
     needs: build
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/v')
+    # ✅ 修复：同时支持 tag push 和 workflow_dispatch 手动触发
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch' && github.event.inputs.release == 'true'
 
     steps:
-      # ⚠️ checkout 必须在 download-artifact 之前，
-      #    否则 checkout 会清空已下载的文件
       - name: Checkout
         uses: actions/checkout@v4
 
-      # ✅ 修复 Bug 1：每个 artifact 单独指定 name + path，
-      #    避免自动创建嵌套目录
+      # 验证当前 ref 是 tag，否则报错提示
+      - name: Verify tag exists
+        run: |
+          if ! git describe --tags --exact-match HEAD 2>/dev/null; then
+            if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+              echo "⚠️  当前 HEAD 不是一个 tag，Release 将使用 'dev' 作为版本号"
+            fi
+          fi
+
       - name: Download artifact (x86_64)
         uses: actions/download-artifact@v4
         with:
@@ -107,14 +113,19 @@ jobs:
 
       - name: Package & checksum
         run: |
-          VERSION="${GITHUB_REF_NAME}"
+          # tag push 用 tag 名，手动触发用 git describe
+          if startsWith(github.ref, 'refs/tags/'); then
+            VERSION="${GITHUB_REF_NAME}"
+          else
+            VERSION=$(git describe --tags --always 2>/dev/null || echo "dev")
+          fi
+          echo "VERSION=${VERSION}" >> "$GITHUB_ENV"
+
           chmod +x release/disk_alert_*
 
-          # 验证文件结构（调试用，确认文件存在）
           echo "=== Files in release/ ==="
           ls -lh release/
 
-          # 每个架构单独打 tar.gz，包内文件名统一为 disk_alert
           for bin in release/disk_alert_*; do
             ARCH=$(basename "$bin" | sed 's/disk_alert_//')
             tar -czf "release/disk_alert_${VERSION}_linux_${ARCH}.tar.gz" \
@@ -122,7 +133,6 @@ jobs:
               --transform "s|$(basename $bin)|disk_alert|"
           done
 
-          # 只对 tar.gz 生成 SHA256（排除原始二进制）
           (cd release && sha256sum disk_alert_*.tar.gz > SHA256SUMS)
 
           echo "=== Final release assets ==="
@@ -131,12 +141,13 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          name: "disk_alert ${{ github.ref_name }}"
+          tag_name: ${{ env.VERSION }}
+          name: "disk_alert ${{ env.VERSION }}"
           draft: false
           prerelease: false
           generate_release_notes: true
           body: |
-            ## disk_alert ${{ github.ref_name }}
+            ## disk_alert ${{ env.VERSION }}
 
             极致轻量的磁盘空间告警工具 → 飞书通知
 
@@ -149,12 +160,10 @@ jobs:
             ### 快速部署
 
             ```bash
-            # 下载安装（以 x86_64 为例）
             curl -fsSL \
-              https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/disk_alert_${{ github.ref_name }}_linux_x86_64.tar.gz \
+              https://github.com/${{ github.repository }}/releases/download/${{ env.VERSION }}/disk_alert_${{ env.VERSION }}_linux_x86_64.tar.gz \
               | sudo tar -xz -C /usr/local/bin/
 
-            # systemd timer
             sudo tee /etc/systemd/system/disk-alert.service << 'EOF'
             [Unit]
             Description=Disk space alert to Feishu
@@ -177,18 +186,5 @@ jobs:
             ```
 
             ### 支持架构
-
             | 文件 | 架构 | 适用场景 |
-            |------|------|---------|
-            | `..._linux_x86_64.tar.gz`  | x86_64 | 常规服务器 / VPS |
-            | `..._linux_aarch64.tar.gz` | arm64  | 树莓派 4、ARM 云服务器 |
-            | `..._linux_armv7l.tar.gz`  | armv7  | 树莓派 2/3、嵌入式设备 |
-
-            ### 校验完整性
-            ```bash
-            sha256sum -c SHA256SUMS
-            ```
-          # ✅ 只上传 tar.gz 和 SHA256SUMS，路径确定无 glob 歧义
-          files: |
-            release/disk_alert_*.tar.gz
-            release/SHA256SUMS
+         _
