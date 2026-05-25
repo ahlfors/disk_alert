@@ -13,7 +13,7 @@ permissions:
 
 jobs:
   # ═══════════════════════════════════════════════════
-  # Job 1: 多架构静态编译（zig cc 交叉编译，无需 qemu）
+  # Job 1: 多架构静态编译
   # ═══════════════════════════════════════════════════
   build:
     name: Build [${{ matrix.arch }}]
@@ -30,21 +30,17 @@ jobs:
             target: aarch64-linux-musl
 
           - arch:   armv7l
-            target: arm-linux-musleabihf   # zig 的 armv7 target 名
+            target: arm-linux-musleabihf
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # ── 安装 Zig（官方预编译二进制，无 apt 污染） ──────
-      - name: Install Zig
-        run: |
-          ZIG_VERSION="0.13.0"
-          ZIG_TAR="zig-linux-x86_64-${ZIG_VERSION}.tar.xz"
-          wget -q "https://ziglang.org/download/${ZIG_VERSION}/${ZIG_TAR}" -O /tmp/zig.tar.xz
-          tar -xf /tmp/zig.tar.xz -C /opt
-          echo "/opt/zig-linux-x86_64-${ZIG_VERSION}" >> "$GITHUB_PATH"
-          zig version
+      # ── 用官方 Action 安装 Zig，自动处理 PATH + 缓存 ──
+      - name: Setup Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: "0.13.0"
 
       # ── 静态交叉编译 ────────────────────────────────
       - name: Compile static binary
@@ -52,8 +48,6 @@ jobs:
           VERSION=$(git describe --tags --always --dirty 2>/dev/null || echo "dev")
           mkdir -p dist
 
-          # zig cc = Clang 前端 + 内置 musl libc + 内置链接器
-          # -target 直接指定架构，无需任何外部工具链
           zig cc \
             -target ${{ matrix.target }} \
             -Os \
@@ -66,7 +60,7 @@ jobs:
           ls -lh dist/disk_alert_${{ matrix.arch }}
           file dist/disk_alert_${{ matrix.arch }}
 
-      # ── 冒烟测试（仅 x86_64，其他架构无法在 runner 直接运行） ──
+      # ── 冒烟测试（仅 x86_64 可在 runner 上直接执行） ──
       - name: Smoke test (x86_64 only)
         if: matrix.arch == 'x86_64'
         run: |
@@ -174,9 +168,9 @@ jobs:
 
             | 文件 | 架构 | 适用场景 |
             |------|------|---------|
-            | `..._linux_x86_64.tar.gz`  | x86_64  | 常规服务器 / VPS |
-            | `..._linux_aarch64.tar.gz` | arm64   | 树莓派 4、ARM 云服务器 |
-            | `..._linux_armv7l.tar.gz`  | armv7   | 树莓派 2/3、嵌入式设备 |
+            | `..._linux_x86_64.tar.gz`  | x86_64 | 常规服务器 / VPS |
+            | `..._linux_aarch64.tar.gz` | arm64  | 树莓派 4、ARM 云服务器 |
+            | `..._linux_armv7l.tar.gz`  | armv7  | 树莓派 2/3、嵌入式设备 |
 
             ### 校验完整性
             ```bash
