@@ -44,7 +44,7 @@ jobs:
 
           - arch:   s390x
             target: s390x-linux-musl
-            cpu:    z15                  # ✅ z15 = Linux 支持的最低基准 CPU
+            cpu:    "arch8"                  # zig 0.14+ 用 arch8 作为 s390x baseline
 
     steps:
       - name: Checkout
@@ -53,7 +53,7 @@ jobs:
       - name: Setup Zig
         uses: mlugg/setup-zig@v2
         with:
-          version: "0.13.0"
+          version: "0.14.1"  # ← 从 0.13.0 升级到 0.14.1
 
       - name: Compile static binary
         run: |
