@@ -3,17 +3,17 @@ name: Build disk_alert
 on:
   push:
     branches: [ main, master ]
-    tags:     [ 'v*' ]          # 推 tag 时触发 Release
+    tags:     [ 'v*' ]
   pull_request:
     branches: [ main, master ]
-  workflow_dispatch:             # 支持手动触发
+  workflow_dispatch:
 
 permissions:
-  contents: write               # 创建 Release 需要写权限
+  contents: write
 
 jobs:
   # ═══════════════════════════════════════════════════
-  # Job 1: 多架构静态编译
+  # Job 1: 多架构静态编译（zig cc 交叉编译，无需 qemu）
   # ═══════════════════════════════════════════════════
   build:
     name: Build [${{ matrix.arch }}]
@@ -23,74 +23,60 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - arch: x86_64                          # 常规服务器 / VPS
-          - arch: aarch64                         # 树莓派 4、ARM 服务器
-          - arch: armv7l                          # 树莓派 2/3、嵌入式
+          - arch:   x86_64
+            target: x86_64-linux-musl
+
+          - arch:   aarch64
+            target: aarch64-linux-musl
+
+          - arch:   armv7l
+            target: arm-linux-musleabihf   # zig 的 armv7 target 名
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # ── 安装 musl 交叉工具链 ─────────────────────
-      - name: Install musl cross toolchain
+      # ── 安装 Zig（官方预编译二进制，无 apt 污染） ──────
+      - name: Install Zig
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y musl-tools wget
+          ZIG_VERSION="0.13.0"
+          ZIG_TAR="zig-linux-x86_64-${ZIG_VERSION}.tar.xz"
+          wget -q "https://ziglang.org/download/${ZIG_VERSION}/${ZIG_TAR}" -O /tmp/zig.tar.xz
+          tar -xf /tmp/zig.tar.xz -C /opt
+          echo "/opt/zig-linux-x86_64-${ZIG_VERSION}" >> "$GITHUB_PATH"
+          zig version
 
-          case "${{ matrix.arch }}" in
-            x86_64)
-              # x86_64 直接使用系统 musl-gcc，无需下载
-              echo "CC=musl-gcc" >> "$GITHUB_ENV"
-              ;;
-            aarch64)
-              URL="https://musl.cc/aarch64-linux-musl-cross.tgz"
-              wget -q "$URL" -O /tmp/cross.tgz
-              tar -xf /tmp/cross.tgz -C /opt
-              DIR=$(tar -tf /tmp/cross.tgz | head -1 | cut -d/ -f1)
-              echo "/opt/${DIR}/bin" >> "$GITHUB_PATH"
-              echo "CC=/opt/${DIR}/bin/aarch64-linux-musl-gcc" >> "$GITHUB_ENV"
-              ;;
-            armv7l)
-              URL="https://musl.cc/armv7l-linux-musleabihf-cross.tgz"
-              wget -q "$URL" -O /tmp/cross.tgz
-              tar -xf /tmp/cross.tgz -C /opt
-              DIR=$(tar -tf /tmp/cross.tgz | head -1 | cut -d/ -f1)
-              echo "/opt/${DIR}/bin" >> "$GITHUB_PATH"
-              echo "CC=/opt/${DIR}/bin/armv7l-linux-musleabihf-gcc" >> "$GITHUB_ENV"
-              ;;
-          esac
-
-      # ── 静态编译 ─────────────────────────────────
+      # ── 静态交叉编译 ────────────────────────────────
       - name: Compile static binary
         run: |
           VERSION=$(git describe --tags --always --dirty 2>/dev/null || echo "dev")
           mkdir -p dist
 
-          $CC \
+          # zig cc = Clang 前端 + 内置 musl libc + 内置链接器
+          # -target 直接指定架构，无需任何外部工具链
+          zig cc \
+            -target ${{ matrix.target }} \
             -Os \
-            -static \
             -s \
+            -static \
             -DVERSION=\"${VERSION}\" \
             -o dist/disk_alert_${{ matrix.arch }} \
             disk_alert.c
 
-          echo "=== Binary info ==="
           ls -lh dist/disk_alert_${{ matrix.arch }}
           file dist/disk_alert_${{ matrix.arch }}
 
-      # ── 冒烟测试（x86_64 本地可直接运行） ─────────
+      # ── 冒烟测试（仅 x86_64，其他架构无法在 runner 直接运行） ──
       - name: Smoke test (x86_64 only)
         if: matrix.arch == 'x86_64'
         run: |
-          # 阈值 0% 保证触发告警代码路径；webhook 无效故发送失败，
-          # 关键是验证：无 segfault，无 crash
           ./dist/disk_alert_x86_64 \
             -t 0 -p / \
             -w "https://open.feishu.cn/open-apis/bot/v2/hook/smoke-test" \
             || true
           echo "✓ binary executed without crash"
 
-      # ── 上传构建产物 ──────────────────────────────
+      # ── 上传 Artifact ───────────────────────────────
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
@@ -111,25 +97,21 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # 下载所有架构的 artifact
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
           path: dist/
 
-      # 整理文件，打包 tar.gz，生成 SHA256
       - name: Package & checksum
         run: |
           VERSION="${GITHUB_REF_NAME}"
           mkdir -p release
 
-          # 将各架构二进制收集到 release/
           find dist/ -type f -name 'disk_alert_*' | while read f; do
             cp "$f" release/
             chmod +x "release/$(basename $f)"
           done
 
-          # 每个架构单独打 tar.gz，包内文件名统一为 disk_alert
           for bin in release/disk_alert_*; do
             ARCH=$(basename "$bin" | sed 's/disk_alert_//')
             tar -czf "release/disk_alert_${VERSION}_linux_${ARCH}.tar.gz" \
@@ -137,13 +119,9 @@ jobs:
               --transform "s|$(basename $bin)|disk_alert|"
           done
 
-          # 生成 SHA256 校验清单
           (cd release && sha256sum disk_alert_*.tar.gz > SHA256SUMS)
-
-          echo "=== Release artifacts ==="
           ls -lh release/
 
-      # 创建 GitHub Release 并上传产物
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
@@ -165,12 +143,12 @@ jobs:
             ### 快速部署
 
             ```bash
-            # 下载并安装（以 x86_64 为例）
+            # 下载安装（以 x86_64 为例）
             curl -fsSL \
               https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/disk_alert_${{ github.ref_name }}_linux_x86_64.tar.gz \
               | sudo tar -xz -C /usr/local/bin/
 
-            # 配置 systemd timer（每 10 分钟检查）
+            # systemd timer（每 10 分钟检测）
             sudo tee /etc/systemd/system/disk-alert.service << 'EOF'
             [Unit]
             Description=Disk space alert to Feishu
@@ -189,8 +167,7 @@ jobs:
             WantedBy=timers.target
             EOF
 
-            sudo systemctl daemon-reload
-            sudo systemctl enable --now disk-alert.timer
+            sudo systemctl daemon-reload && sudo systemctl enable --now disk-alert.timer
             ```
 
             ### 支持架构
@@ -201,8 +178,7 @@ jobs:
             | `..._linux_aarch64.tar.gz` | arm64   | 树莓派 4、ARM 云服务器 |
             | `..._linux_armv7l.tar.gz`  | armv7   | 树莓派 2/3、嵌入式设备 |
 
-            ### 校验文件完整性
-
+            ### 校验完整性
             ```bash
             sha256sum -c SHA256SUMS
             ```
