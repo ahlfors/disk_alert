@@ -9,7 +9,7 @@ on:
   workflow_dispatch:
     inputs:
       release:
-        description: '是否创建 Release（仅在推送了 tag 时有效）'
+        description: '是否创建 Release'
         required: false
         default: 'false'
         type: choice
@@ -19,9 +19,13 @@ permissions:
   contents: write
 
 jobs:
+  # ═══════════════════════════════════════════════════
+  # Job 1: 多架构静态编译
+  # ═══════════════════════════════════════════════════
   build:
     name: Build [${{ matrix.arch }}]
     runs-on: ubuntu-latest
+
     strategy:
       fail-fast: false
       matrix:
@@ -73,25 +77,34 @@ jobs:
           path: dist/disk_alert_${{ matrix.arch }}
           retention-days: 30
 
+  # ═══════════════════════════════════════════════════
+  # Job 2: 打包 & 发布 Release
+  # ═══════════════════════════════════════════════════
   release:
     name: Release
     needs: build
     runs-on: ubuntu-latest
-    # ✅ 修复：同时支持 tag push 和 workflow_dispatch 手动触发
-    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch' && github.event.inputs.release == 'true'
+    # ✅ 修复1：if 用 | 块语法，|| 前后各一行，括号对齐清晰
+    if: >-
+      startsWith(github.ref, 'refs/tags/v') ||
+      (github.event_name == 'workflow_dispatch' &&
+       github.event.inputs.release == 'true')
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # 验证当前 ref 是 tag，否则报错提示
-      - name: Verify tag exists
+      # ✅ 修复2：显式声明 shell: bash，避免 [[ ]] 解析歧义
+      - name: Resolve version
+        id: version
+        shell: bash
         run: |
-          if ! git describe --tags --exact-match HEAD 2>/dev/null; then
-            if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-              echo "⚠️  当前 HEAD 不是一个 tag，Release 将使用 'dev' 作为版本号"
-            fi
+          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            VERSION="${GITHUB_REF_NAME}"
+          else
+            VERSION=$(git describe --tags --always 2>/dev/null || echo "dev")
           fi
+          echo "value=${VERSION}" >> "${GITHUB_OUTPUT}"
 
       - name: Download artifact (x86_64)
         uses: actions/download-artifact@v4
@@ -112,15 +125,9 @@ jobs:
           path: release/
 
       - name: Package & checksum
+        shell: bash
         run: |
-          # tag push 用 tag 名，手动触发用 git describe
-          if startsWith(github.ref, 'refs/tags/'); then
-            VERSION="${GITHUB_REF_NAME}"
-          else
-            VERSION=$(git describe --tags --always 2>/dev/null || echo "dev")
-          fi
-          echo "VERSION=${VERSION}" >> "$GITHUB_ENV"
-
+          VERSION="${{ steps.version.outputs.value }}"
           chmod +x release/disk_alert_*
 
           echo "=== Files in release/ ==="
@@ -129,8 +136,8 @@ jobs:
           for bin in release/disk_alert_*; do
             ARCH=$(basename "$bin" | sed 's/disk_alert_//')
             tar -czf "release/disk_alert_${VERSION}_linux_${ARCH}.tar.gz" \
-              -C release "$(basename $bin)" \
-              --transform "s|$(basename $bin)|disk_alert|"
+              -C release "$(basename "$bin")" \
+              --transform "s|$(basename "$bin")|disk_alert|"
           done
 
           (cd release && sha256sum disk_alert_*.tar.gz > SHA256SUMS)
@@ -141,13 +148,13 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ env.VERSION }}
-          name: "disk_alert ${{ env.VERSION }}"
+          tag_name: ${{ steps.version.outputs.value }}
+          name: "disk_alert ${{ steps.version.outputs.value }}"
           draft: false
           prerelease: false
           generate_release_notes: true
           body: |
-            ## disk_alert ${{ env.VERSION }}
+            ## disk_alert ${{ steps.version.outputs.value }}
 
             极致轻量的磁盘空间告警工具 → 飞书通知
 
@@ -161,7 +168,7 @@ jobs:
 
             ```bash
             curl -fsSL \
-              https://github.com/${{ github.repository }}/releases/download/${{ env.VERSION }}/disk_alert_${{ env.VERSION }}_linux_x86_64.tar.gz \
+              https://github.com/${{ github.repository }}/releases/download/${{ steps.version.outputs.value }}/disk_alert_${{ steps.version.outputs.value }}_linux_x86_64.tar.gz \
               | sudo tar -xz -C /usr/local/bin/
 
             sudo tee /etc/systemd/system/disk-alert.service << 'EOF'
@@ -187,4 +194,15 @@ jobs:
 
             ### 支持架构
             | 文件 | 架构 | 适用场景 |
-         _
+            |------|------|---------|
+            | `..._linux_x86_64.tar.gz`  | x86_64 | 常规服务器 / VPS |
+            | `..._linux_aarch64.tar.gz` | arm64  | 树莓派 4、ARM 云服务器 |
+            | `..._linux_armv7l.tar.gz`  | armv7  | 树莓派 2/3、嵌入式设备 |
+
+            ### 校验完整性
+            ```bash
+            sha256sum -c SHA256SUMS
+            ```
+          files: |
+            release/disk_alert_*.tar.gz
+            release/SHA256SUMS
